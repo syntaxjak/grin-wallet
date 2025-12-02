@@ -737,24 +737,69 @@ pub fn parse_multisig_args(args: &ArgMatches) -> Result<command::MultisigArgs, P
 				outfile,
 			})
 		}
-		("frost-commitment", Some(commit_args)) => {
+		("frost-record-commitment", Some(commit_args))
+		| ("frost-commitment", Some(commit_args)) => {
 			let slate_id = parse_required(commit_args, "slate_id")?;
 			let label = parse_required(commit_args, "label")?;
-			let file_path = parse_required(commit_args, "file")?;
+			let data_path = parse_optional(commit_args, "data-path")?;
+			let legacy_path = parse_optional(commit_args, "legacy-file")?;
+			let file_value = data_path.or(legacy_path).ok_or_else(|| {
+				ParseError::ArgumentError(
+					"--data-path (or legacy --file) must be provided".to_string(),
+				)
+			})?;
 			Ok(command::MultisigArgs::FrostRecordCommitment {
 				slate_id: slate_id.to_owned(),
 				label: label.to_owned(),
-				data_path: PathBuf::from(file_path),
+				data_path: PathBuf::from(file_value),
 			})
 		}
-		("frost-signature", Some(sig_args)) => {
+		("frost-record-signature", Some(sig_args)) | ("frost-signature", Some(sig_args)) => {
 			let slate_id = parse_required(sig_args, "slate_id")?;
 			let label = parse_required(sig_args, "label")?;
-			let file_path = parse_required(sig_args, "file")?;
+			let data_path = parse_optional(sig_args, "data-path")?;
+			let legacy_path = parse_optional(sig_args, "legacy-file")?;
+			let file_value = data_path.or(legacy_path).ok_or_else(|| {
+				ParseError::ArgumentError(
+					"--data-path (or legacy --file) must be provided".to_string(),
+				)
+			})?;
 			Ok(command::MultisigArgs::FrostRecordSignature {
 				slate_id: slate_id.to_owned(),
 				label: label.to_owned(),
-				data_path: PathBuf::from(file_path),
+				data_path: PathBuf::from(file_value),
+			})
+		}
+		("frost-export-share", Some(export_args)) => {
+			let slate_id = parse_required(export_args, "slate-id")?;
+			let label = parse_required(export_args, "label")?;
+			let outfile = parse_optional(export_args, "outfile")?.map(PathBuf::from);
+			Ok(command::MultisigArgs::FrostExportShare {
+				slate_id: slate_id.to_owned(),
+				label: label.to_owned(),
+				outfile,
+			})
+		}
+		("frost-generate-commitment", Some(gen_args)) => {
+			let share_path = parse_required(gen_args, "share-path")?;
+			let nonce_out = parse_required(gen_args, "nonce-out")?;
+			let commitment_out = parse_optional(gen_args, "commitment-out")?.map(PathBuf::from);
+			Ok(command::MultisigArgs::FrostGenerateCommitment {
+				share_path: PathBuf::from(share_path),
+				commitment_out,
+				nonce_out: PathBuf::from(nonce_out),
+			})
+		}
+		("frost-generate-signature", Some(gen_args)) => {
+			let share_path = parse_required(gen_args, "share-path")?;
+			let signing_package_path = parse_required(gen_args, "signing-package-path")?;
+			let nonce_path = parse_required(gen_args, "nonce-path")?;
+			let outfile = parse_optional(gen_args, "outfile")?.map(PathBuf::from);
+			Ok(command::MultisigArgs::FrostGenerateSignature {
+				share_path: PathBuf::from(share_path),
+				signing_package_path: PathBuf::from(signing_package_path),
+				nonce_path: PathBuf::from(nonce_path),
+				outfile,
 			})
 		}
 		_ => Err(ParseError::ArgumentError(

@@ -333,8 +333,76 @@ subcommands:
                   short: o
                   long: outfile
                   takes_value: true
-        - frost-commitment:
+        - frost-export-share:
+            about: Export a holder's share bundle for the active FROST session
+            args:
+              - slate-id:
+                  help: Slate identifier (UUID)
+                  short: s
+                  long: slate-id
+                  takes_value: true
+                  required: true
+              - label:
+                  help: Participant label to export
+                  short: l
+                  long: label
+                  takes_value: true
+                  required: true
+              - outfile:
+                  help: Write the share data to the specified file instead of stdout
+                  short: o
+                  long: outfile
+                  takes_value: true
+        - frost-generate-commitment:
+            about: Generate a holder's round-1 FROST commitment and nonce bundle
+            args:
+              - share-path:
+                  help: Path to the exported share JSON file
+                  short: s
+                  long: share-path
+                  takes_value: true
+                  required: true
+              - nonce-out:
+                  help: Write the generated nonces to this file (keep private)
+                  short: n
+                  long: nonce-out
+                  takes_value: true
+                  required: true
+              - commitment-out:
+                  help: Write the serialized commitment JSON to this file (defaults to stdout)
+                  short: c
+                  long: commitment-out
+                  takes_value: true
+        - frost-generate-signature:
+            about: Produce a holder's round-2 FROST signature share
+            args:
+              - share-path:
+                  help: Path to the exported share JSON file
+                  short: s
+                  long: share-path
+                  takes_value: true
+                  required: true
+              - nonce-path:
+                  help: Path to the previously generated nonce file
+                  short: n
+                  long: nonce-path
+                  takes_value: true
+                  required: true
+              - signing-package-path:
+                  help: Signing package JSON provided by the coordinator
+                  short: p
+                  long: signing-package-path
+                  takes_value: true
+                  required: true
+              - outfile:
+                  help: Write the signature share JSON to this file (defaults to stdout)
+                  short: o
+                  long: outfile
+                  takes_value: true
+        - frost-record-commitment:
             about: Record a participant's round-1 FROST commitment
+            aliases:
+              - frost-commitment
             args:
               - slate_id:
                   help: Slate identifier (UUID)
@@ -348,14 +416,21 @@ subcommands:
                   long: label
                   takes_value: true
                   required: true
-              - file:
+              - data-path:
                   help: File containing the serialized commitment payload (hex, base64, or binary)
                   short: f
-                  long: file
+                  long: data-path
                   takes_value: true
                   required: true
-        - frost-signature:
+              - legacy-file:
+                  help: Deprecated alias for --data-path
+                  long: file
+                  takes_value: true
+                  hidden: true
+        - frost-record-signature:
             about: Record a participant's round-2 FROST signature share
+            aliases:
+              - frost-signature
             args:
               - slate_id:
                   help: Slate identifier (UUID)
@@ -369,12 +444,17 @@ subcommands:
                   long: label
                   takes_value: true
                   required: true
-              - file:
+              - data-path:
                   help: File containing the serialized signature share (hex, base64, or binary)
                   short: f
-                  long: file
+                  long: data-path
                   takes_value: true
                   required: true
+              - legacy-file:
+                  help: Deprecated alias for --data-path
+                  long: file
+                  takes_value: true
+                  hidden: true
   - invoice:
       about: Initialize an invoice transaction, outputting a Slatepack Message with the result
       args:
