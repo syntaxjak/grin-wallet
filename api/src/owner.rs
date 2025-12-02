@@ -28,7 +28,7 @@ use crate::keychain::{Identifier, Keychain};
 use crate::libwallet::api_impl::owner_updater::{start_updater_log_thread, StatusMessage};
 use crate::libwallet::api_impl::{owner, owner_updater};
 use crate::libwallet::{
-	AcctPathMapping, BuiltOutput, Error, FrostSession, FrostSigningState, InitTxArgs,
+	multisig, AcctPathMapping, BuiltOutput, Error, FrostSession, FrostSigningState, InitTxArgs,
 	IssueInvoiceTxArgs, NodeClient, NodeHeightResult, OutputCommitMapping, PaymentProof, Slate,
 	Slatepack, SlatepackAddress, TxLogEntry, ViewWallet, WalletInfo, WalletInst, WalletLCProvider,
 };
@@ -39,6 +39,7 @@ use crate::util::{from_hex, static_secp_instance, Mutex, ZeroingString};
 use base64;
 use grin_wallet_util::OnionV3Address;
 use std::convert::TryFrom;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
@@ -205,6 +206,10 @@ where
 			updater_messages,
 			tor_config: Mutex::new(None),
 		}
+	}
+
+	fn multisig_root(&self) -> Result<PathBuf, Error> {
+		self.get_top_level_directory().map(PathBuf::from)
 	}
 
 	/// Set the TOR configuration for this instance of the OwnerAPI, used during
@@ -663,11 +668,13 @@ where
 		args: InitTxArgs,
 	) -> Result<Slate, Error> {
 		let send_args = args.send_args.clone();
+		let multisig_root = self.multisig_root()?;
 		let slate = {
 			let mut w_lock = self.wallet_inst.lock();
 			let w = w_lock.lc_provider()?.wallet_inst()?;
 			owner::init_send_tx(&mut **w, keychain_mask, args, self.doctest_mode)?
 		};
+		multisig::create_pending_session(multisig_root.as_path(), &slate)?;
 		// Helper functionality. If send arguments exist, attempt to send sync and
 		// finalize
 		let skip_tor = match send_args.as_ref() {
@@ -835,11 +842,13 @@ where
 		slate: &Slate,
 		args: InitTxArgs,
 	) -> Result<Slate, Error> {
+		let multisig_root = self.multisig_root()?;
 		let mut w_lock = self.wallet_inst.lock();
 		let w = w_lock.lc_provider()?.wallet_inst()?;
 		let send_args = args.send_args.clone();
 		let slate =
 			owner::process_invoice_tx(&mut **w, keychain_mask, slate, args, self.doctest_mode)?;
+		multisig::create_pending_session(multisig_root.as_path(), &slate)?;
 		// Helper functionality. If send arguments exist, attempt to send
 		match send_args {
 			Some(sa) => {
@@ -928,6 +937,9 @@ where
 		keychain_mask: Option<&SecretKey>,
 		slate: &Slate,
 	) -> Result<(), Error> {
+		let multisig_root = self.multisig_root()?;
+		multisig::create_pending_session(multisig_root.as_path(), slate)?;
+		multisig::ensure_threshold(multisig_root.as_path(), slate)?;
 		let mut w_lock = self.wallet_inst.lock();
 		let w = w_lock.lc_provider()?.wallet_inst()?;
 		owner::tx_lock_outputs(&mut **w, keychain_mask, slate)
@@ -994,9 +1006,14 @@ where
 		keychain_mask: Option<&SecretKey>,
 		slate: &Slate,
 	) -> Result<Slate, Error> {
+		let multisig_root = self.multisig_root()?;
+		multisig::create_pending_session(multisig_root.as_path(), slate)?;
+		multisig::ensure_threshold(multisig_root.as_path(), slate)?;
 		let mut w_lock = self.wallet_inst.lock();
 		let w = w_lock.lc_provider()?.wallet_inst()?;
-		owner::finalize_tx(&mut **w, keychain_mask, slate)
+		let ret = owner::finalize_tx(&mut **w, keychain_mask, slate)?;
+		multisig::mark_finalized(multisig_root.as_path(), &ret)?;
+		Ok(ret)
 	}
 
 	/// Posts a completed transaction to the listening node for validation and inclusion in a block

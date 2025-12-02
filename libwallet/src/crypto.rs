@@ -160,6 +160,68 @@ pub mod frost {
 			.map_err(|e| FrostConversionError::Serialization(e.to_string()))
 	}
 
+	/// Serialize a signing package to raw bytes.
+	pub fn serialize_signing_package(
+		signing_package: &SigningPackage,
+	) -> Result<Vec<u8>, FrostConversionError> {
+		signing_package
+			.serialize()
+			.map_err(|e| FrostConversionError::Serialization(e.to_string()))
+	}
+
+	/// Deserialize a signing package from raw bytes.
+	pub fn deserialize_signing_package(
+		bytes: &[u8],
+	) -> Result<SigningPackage, FrostConversionError> {
+		SigningPackage::deserialize(bytes)
+			.map_err(|e| FrostConversionError::Serialization(e.to_string()))
+	}
+
+	/// Serialize signing nonces to raw bytes.
+	pub fn serialize_signing_nonces(
+		nonces: &round1::SigningNonces,
+	) -> Result<Vec<u8>, FrostConversionError> {
+		nonces
+			.serialize()
+			.map_err(|e| FrostConversionError::Serialization(e.to_string()))
+	}
+
+	/// Deserialize signing nonces from raw bytes.
+	pub fn deserialize_signing_nonces(
+		bytes: &[u8],
+	) -> Result<round1::SigningNonces, FrostConversionError> {
+		round1::SigningNonces::deserialize(bytes)
+			.map_err(|e| FrostConversionError::Serialization(e.to_string()))
+	}
+
+	/// Generate a Round-1 signing commitment and serialized nonces for the provided FROST
+	/// key package.
+	pub fn generate_round1_commitment(
+		key_package_bytes: &[u8],
+	) -> Result<(Vec<u8>, Vec<u8>), FrostConversionError> {
+		let key_package = deserialize_key_package(key_package_bytes)?;
+		let mut rng = OsRng;
+		let (nonces, commitment) = round1::commit(key_package.signing_share(), &mut rng);
+		let commitment_bytes = serialize_round1_commitments(&commitment)?;
+		let nonce_bytes = serialize_signing_nonces(&nonces)?;
+		Ok((commitment_bytes, nonce_bytes))
+	}
+
+	/// Generate a Round-2 signature share for the provided FROST key package using the
+	/// serialized signing nonces and signing package bytes supplied by the coordinator.
+	pub fn generate_round2_signature(
+		key_package_bytes: &[u8],
+		nonce_bytes: &[u8],
+		signing_package_bytes: &[u8],
+	) -> Result<Vec<u8>, FrostConversionError> {
+		let key_package = deserialize_key_package(key_package_bytes)?;
+		let nonces = deserialize_signing_nonces(nonce_bytes)?;
+		let signing_package = deserialize_signing_package(signing_package_bytes)?;
+		let signature_share = round2::sign(&signing_package, &nonces, &key_package)
+			.map_err(|e| FrostConversionError::Serialization(e.to_string()))?;
+		serialize_round2_signature(&signature_share)
+	}
+
 	/// Split a secret into shares for the given participant labels using the dealer
 	/// method and return serialized session data.
 	pub fn split_secret_with_labels(
@@ -380,7 +442,7 @@ pub mod frost {
 		use frost_secp256k1::{rand_core::RngCore, round1, round2, SigningPackage};
 		use grin_keychain::Identifier as KeychainIdentifier;
 		use grin_util::secp::Secp256k1;
-		use std::collections::BTreeMap;
+		use std::collections::{BTreeMap, HashMap};
 
 		#[test]
 		#[ignore]
@@ -468,6 +530,86 @@ pub mod frost {
 			let compressed = grin_pubkey.serialize_vec(&secp, true);
 			assert_eq!(compressed.as_slice(), verifying_bytes.as_slice());
 			let _serialized_sig = grin_signature.serialize_compact(&secp);
+		}
+
+		#[test]
+		fn frost_holder_workflow_roundtrip() {
+			use crate::types::Context;
+			let secp = Secp256k1::new();
+			let parent_key_id = KeychainIdentifier::zero();
+			let mut context = Context::new(&secp, &parent_key_id, true, true);
+			let labels = vec!["alice".to_string(), "bob".to_string(), "carol".to_string()];
+			let threshold = 2u16;
+			initialize_context_frost_session(&mut context, threshold, &labels)
+				.expect("session initialization");
+			let session = context.frost_session().cloned().expect("session stored");
+
+			let mut holder_data: HashMap<_, _> = HashMap::new();
+			for participant in &session.participants {
+				let (commitment_bytes, nonce_bytes) =
+					generate_round1_commitment(&participant.key_package).expect("round1");
+				holder_data.insert(
+					participant.label.clone(),
+					(
+						commitment_bytes,
+						nonce_bytes,
+						participant.key_package.clone(),
+					),
+				);
+			}
+
+			for label in &labels[0..2] {
+				let (commitment_bytes, _, _) = holder_data.get(label).expect("holder data");
+				let commitment =
+					deserialize_round1_commitments(commitment_bytes).expect("commitment");
+				record_round1_commitment(&mut context, label.clone(), &commitment)
+					.expect("record commitment");
+			}
+
+			let signing_state = context
+				.frost_signing_state()
+				.cloned()
+				.expect("signing state");
+			let mut commitment_lookup: HashMap<_, _> = signing_state
+				.commitments
+				.iter()
+				.map(|c| (c.label.as_str(), c.commitment.clone()))
+				.collect();
+			let mut signing_commitments = BTreeMap::new();
+			for participant in &session.participants {
+				if let Some(bytes) = commitment_lookup.remove(participant.label.as_str()) {
+					let identifier =
+						identifier_from_bytes(&participant.identifier).expect("identifier");
+					let commitment =
+						deserialize_round1_commitments(&bytes).expect("commitment decode");
+					signing_commitments.insert(identifier, commitment);
+				}
+			}
+
+			let mut message = [0u8; 32];
+			message[0] = 42;
+			let signing_package = SigningPackage::new(signing_commitments, &message);
+			let signing_package_bytes =
+				serialize_signing_package(&signing_package).expect("serialize package");
+
+			for label in &labels[0..2] {
+				let (_, nonce_bytes, key_package_bytes) = holder_data.get(label).expect("holder");
+				let signature_bytes = generate_round2_signature(
+					key_package_bytes,
+					nonce_bytes,
+					&signing_package_bytes,
+				)
+				.expect("signature share");
+				let signature = deserialize_round2_signature(&signature_bytes).expect("sig decode");
+				record_round2_signature(&mut context, label.clone(), &signature)
+					.expect("record signature");
+			}
+
+			let aggregated = aggregate_signature(&context, &message).expect("aggregate");
+			let expected_pubkey = verify_key_from_bytes(&session.verifying_key)
+				.and_then(|vk| verifying_key_to_grin(&vk))
+				.expect("verifying key");
+			assert_eq!(aggregated.aggregated_pubkey, expected_pubkey);
 		}
 
 		#[test]

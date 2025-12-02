@@ -18,12 +18,13 @@ use crate::config::TorConfig;
 use crate::keychain::Keychain;
 use crate::libwallet::api_impl::foreign;
 use crate::libwallet::{
-	BlockFees, CbData, Error, NodeClient, NodeVersionInfo, Slate, VersionInfo, WalletInst,
-	WalletLCProvider,
+	multisig, BlockFees, CbData, Error, NodeClient, NodeVersionInfo, Slate, VersionInfo,
+	WalletInst, WalletLCProvider,
 };
 use crate::try_slatepack_sync_workflow;
 use crate::util::secp::key::SecretKey;
 use crate::util::Mutex;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// ForeignAPI Middleware Check callback
@@ -181,6 +182,12 @@ where
 			keychain_mask,
 			tor_config: Mutex::new(None),
 		}
+	}
+
+	fn multisig_root(&self) -> Result<PathBuf, Error> {
+		let mut w_lock = self.wallet_inst.lock();
+		let lc = w_lock.lc_provider()?;
+		lc.get_top_level_directory().map(PathBuf::from)
 	}
 
 	/// Set the TOR configuration for this instance of the ForeignAPI, used during
@@ -437,18 +444,23 @@ where
 	/// ```
 
 	pub fn finalize_tx(&self, slate: &Slate, post_automatically: bool) -> Result<Slate, Error> {
+		let multisig_root = self.multisig_root()?;
+		multisig::create_pending_session(multisig_root.as_path(), slate)?;
+		multisig::ensure_threshold(multisig_root.as_path(), slate)?;
 		let mut w_lock = self.wallet_inst.lock();
 		let w = w_lock.lc_provider()?.wallet_inst()?;
 		let post_automatically = match self.doctest_mode {
 			true => false,
 			false => post_automatically,
 		};
-		foreign::finalize_tx(
+		let ret = foreign::finalize_tx(
 			&mut **w,
 			(&self.keychain_mask).as_ref(),
 			slate,
 			post_automatically,
-		)
+		)?;
+		multisig::mark_finalized(multisig_root.as_path(), &ret)?;
+		Ok(ret)
 	}
 }
 

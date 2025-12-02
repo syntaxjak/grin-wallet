@@ -1,0 +1,12 @@
+[package]
+name = "traitobject"
+version = "0.1.0"
+edition = "2021"
+authors = ["reem <reem@github.com>"]
+description = "Unsafe helpers for working with raw TraitObjects."
+license = "MIT/Apache-2.0"
+repository = "https://github.com/reem/rust-traitobject"
+
+[lib]
+name = "traitobject"
+path = "src/lib.rs"

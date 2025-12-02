@@ -290,6 +290,10 @@ pub enum Error {
 	#[error("Couldn't decrypt Slatepack: {0}")]
 	SlatepackDecryption(String),
 
+	/// Multi-signature policy violation
+	#[error("Multisig policy error: {0}")]
+	Multisig(String),
+
 	/// age error
 	#[error("Age error: {0}")]
 	Age(String),

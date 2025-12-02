@@ -18,7 +18,7 @@ This is the reference implementation of [Grin's](https://github.com/mimblewimble
 
 To use the command-line wallet, we recommend using the latest release from the [Releases page](https://github.com/mimblewimble/grin-wallet/releases). There are distributions for Linux, MacOS and Windows.
 
-Full documentation outlining how to use the command line wallet can be found on [Grin's Wiki](https://github.com/mimblewimble/docs/wiki/Wallet-User-Guide)
+Full documentation outlining how to use the command line wallet can be found on [Grin's Wiki](https://github.com/mimblewimble/docs/wiki/Wallet-User-Guide). For the new threshold multisig workflow (policy approvals + FROST signing), see [`doc/multisig_user_guide.md`](doc/multisig_user_guide.md).
 
 # License
 

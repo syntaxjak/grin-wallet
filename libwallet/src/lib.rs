@@ -48,6 +48,7 @@ pub mod api_impl;
 pub mod crypto;
 mod error;
 mod internal;
+pub mod multisig;
 mod slate;
 pub mod slate_versions;
 pub mod slatepack;
@@ -70,6 +71,10 @@ pub use api_impl::types::{
 	RetrieveTxQuerySortField, RetrieveTxQuerySortOrder, VersionInfo,
 };
 pub use internal::scan::scan;
+pub use multisig::{
+	MultiSigConfig, MultiSigParticipant, MultiSigSession, ParticipantInitResult,
+	ParticipantStorage, SessionApproval, SessionStatus,
+};
 pub use slate_versions::ser as dalek_ser;
 pub use types::{
 	AcctPathMapping, BlockIdentifier, CbData, Context, FrostParticipantShare,

@@ -31,11 +31,13 @@ use crate::util::secp::key::SecretKey;
 use crate::util::{Mutex, ZeroingString};
 use crate::{controller, display, multisig};
 use ::core::time;
-use grin_util::ToHex;
+use frost_secp256k1::SigningPackage;
+use grin_util::{from_hex, ToHex};
 use grin_wallet_api::Token;
 use qr_code::QrCode;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json as json;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryFrom;
 use std::fs;
 use std::fs::File;
@@ -75,6 +77,56 @@ fn encode_payload_from_path(path: &Path) -> Result<String, Error> {
 
 fn bytes_to_hex(data: &[u8]) -> String {
 	data.to_vec().to_hex()
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrostShareFile {
+	label: String,
+	identifier: String,
+	key_package: String,
+	verifying_key: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrostNonceFile {
+	label: String,
+	nonces: String,
+	verifying_key: String,
+}
+
+#[derive(Deserialize)]
+struct SigningPackageEnvelope {
+	signing_package: SigningPackageData,
+}
+
+#[derive(Deserialize)]
+struct SigningPackageData {
+	signing_package_hex: String,
+	verifying_key: String,
+}
+
+fn read_json_from_path<T: DeserializeOwned>(path: &Path) -> Result<T, Error> {
+	let data = fs::read_to_string(path)
+		.map_err(|e| Error::GenericError(format!("Unable to read {}: {}", path.display(), e)))?;
+	serde_json::from_str(&data).map_err(|e| {
+		Error::GenericError(format!(
+			"Unable to parse JSON from {}: {}",
+			path.display(),
+			e
+		))
+	})
+}
+
+fn write_json_to_path<T: Serialize>(path: &Path, value: &T) -> Result<(), Error> {
+	let data = serde_json::to_string_pretty(value).map_err(|e| {
+		Error::GenericError(format!(
+			"Unable to serialize JSON for {}: {}",
+			path.display(),
+			e
+		))
+	})?;
+	fs::write(path, data.as_bytes())
+		.map_err(|e| Error::GenericError(format!("Unable to write {}: {}", path.display(), e)))
 }
 
 fn frost_session_to_json(session: &FrostSession) -> json::Value {
@@ -945,6 +997,22 @@ pub enum MultisigArgs {
 		label: String,
 		data_path: PathBuf,
 	},
+	FrostExportShare {
+		slate_id: String,
+		label: String,
+		outfile: Option<PathBuf>,
+	},
+	FrostGenerateCommitment {
+		share_path: PathBuf,
+		commitment_out: Option<PathBuf>,
+		nonce_out: PathBuf,
+	},
+	FrostGenerateSignature {
+		share_path: PathBuf,
+		signing_package_path: PathBuf,
+		nonce_path: PathBuf,
+		outfile: Option<PathBuf>,
+	},
 }
 
 pub fn finalize<L, C, K>(
@@ -1344,23 +1412,54 @@ where
 				.filter(|label| !signature_labels.contains(*label))
 				.cloned()
 				.collect();
-			let commitments_json: Vec<_> = state
+			let commitment_lookup: HashMap<_, _> = state
 				.commitments
 				.iter()
-				.map(|c| {
-					json::json!({
-						"label": c.label,
-						"commitment": bytes_to_hex(&c.commitment),
-					})
-				})
+				.map(|c| (c.label.as_str(), c))
 				.collect();
-			let message_hex = slate.msg_to_sign()?.as_ref().to_vec().to_hex();
+			let mut signing_commitments = BTreeMap::new();
+			let commitments_json: Vec<_> = session
+				.participants
+				.iter()
+				.map(|participant| {
+					let commitment_entry = commitment_lookup
+						.get(participant.label.as_str())
+						.ok_or_else(|| {
+							Error::Multisig(format!(
+								"Missing commitment for participant '{}'",
+								participant.label
+							))
+						})?;
+					let identifier =
+						libwallet::crypto::frost::identifier_from_bytes(&participant.identifier)
+							.map_err(|e| Error::Multisig(e.to_string()))?;
+					let commitment = libwallet::crypto::frost::deserialize_round1_commitments(
+						&commitment_entry.commitment,
+					)
+					.map_err(|e| Error::Multisig(e.to_string()))?;
+					signing_commitments.insert(identifier, commitment);
+					Ok(json::json!({
+						"label": participant.label,
+						"commitment": bytes_to_hex(&commitment_entry.commitment),
+					}))
+				})
+				.collect::<Result<Vec<_>, Error>>()?;
+			let mut message_bytes = [0u8; 32];
+			let message = slate.msg_to_sign()?;
+			message_bytes.copy_from_slice(message.as_ref());
+			let frost_signing_package = SigningPackage::new(signing_commitments, &message_bytes);
+			let signing_package_bytes =
+				libwallet::crypto::frost::serialize_signing_package(&frost_signing_package)
+					.map_err(|e| Error::Multisig(e.to_string()))?;
+			let message_hex = message.as_ref().to_vec().to_hex();
+			let signing_package_hex = signing_package_bytes.to_hex();
 			let signing_package = json::json!({
 				"slate_id": slate.id.to_string(),
 				"threshold": session.threshold,
 				"message": message_hex,
 				"verifying_key": bytes_to_hex(&session.verifying_key),
 				"commitments": commitments_json,
+				"signing_package_hex": signing_package_hex,
 			});
 			let output_json = json::json!({
 				"session": session_json,
@@ -1423,6 +1522,172 @@ where
 				"Recorded round-2 signature share for '{}' on slate {}",
 				label, uuid
 			);
+			Ok(())
+		}
+		MultisigArgs::FrostExportShare {
+			slate_id,
+			label,
+			outfile,
+		} => {
+			let uuid = Uuid::parse_str(&slate_id).map_err(|e| {
+				Error::GenericError(format!("Invalid slate identifier '{}': {}", slate_id, e))
+			})?;
+			let mut session: Option<FrostSession> = None;
+			controller::owner_single_use(None, None, Some(owner_api), |api, m| {
+				let token = Token {
+					keychain_mask: m.cloned(),
+				};
+				session = api.get_frost_session(token, uuid)?;
+				Ok(())
+			})?;
+			let session = session
+				.ok_or_else(|| Error::Multisig("FROST session metadata not found".to_string()))?;
+			let Some(participant) = session.participants.iter().find(|p| p.label == label) else {
+				return Err(Error::Multisig(format!(
+					"Participant '{}' is not part of this FROST session",
+					label
+				)));
+			};
+			let share_file = FrostShareFile {
+				label: participant.label.clone(),
+				identifier: bytes_to_hex(&participant.identifier),
+				key_package: bytes_to_hex(&participant.key_package),
+				verifying_key: bytes_to_hex(&session.verifying_key),
+			};
+			let serialized = serde_json::to_string_pretty(&share_file).map_err(|e| {
+				Error::GenericError(format!("Unable to serialize share data: {}", e))
+			})?;
+			if let Some(path) = outfile {
+				fs::write(&path, serialized.as_bytes()).map_err(|e| {
+					Error::GenericError(format!("Unable to write {}: {}", path.display(), e))
+				})?;
+				println!("Exported FROST share for '{}' to {}", label, path.display());
+			} else {
+				println!("{}", serialized);
+			}
+			Ok(())
+		}
+		MultisigArgs::FrostGenerateCommitment {
+			share_path,
+			commitment_out,
+			nonce_out,
+		} => {
+			let share: FrostShareFile = read_json_from_path(&share_path)?;
+			let label = share.label.clone();
+			let verifying_key = share.verifying_key.clone();
+			let key_package_bytes = from_hex(&share.key_package).map_err(|e| {
+				Error::GenericError(format!(
+					"Unable to decode key package from {}: {}",
+					share_path.display(),
+					e
+				))
+			})?;
+			let (commitment_bytes, nonce_bytes) =
+				libwallet::crypto::frost::generate_round1_commitment(&key_package_bytes)
+					.map_err(|e| Error::Multisig(e.to_string()))?;
+			let commitment_hex = commitment_bytes.to_hex();
+			let nonce_hex = nonce_bytes.to_hex();
+			let commitment_record = json::json!({
+				"label": label,
+				"commitment": commitment_hex,
+			});
+			match commitment_out {
+				Some(path) => {
+					write_json_to_path(&path, &commitment_record)?;
+					println!("Round-1 commitment written to {}", path.display());
+				}
+				None => {
+					println!(
+						"{}",
+						serde_json::to_string_pretty(&commitment_record).map_err(|e| {
+							Error::GenericError(format!("Unable to serialize commitment: {}", e))
+						})?
+					);
+				}
+			}
+			let nonce_record = FrostNonceFile {
+				label,
+				nonces: nonce_hex,
+				verifying_key,
+			};
+			write_json_to_path(&nonce_out, &nonce_record)?;
+			println!("Signing nonces stored at {}", nonce_out.display());
+			Ok(())
+		}
+		MultisigArgs::FrostGenerateSignature {
+			share_path,
+			signing_package_path,
+			nonce_path,
+			outfile,
+		} => {
+			let share: FrostShareFile = read_json_from_path(&share_path)?;
+			let nonce: FrostNonceFile = read_json_from_path(&nonce_path)?;
+			if share.label != nonce.label {
+				return Err(Error::Multisig(
+					"Share file and nonce file refer to different participants".to_string(),
+				));
+			}
+			if share.verifying_key != nonce.verifying_key {
+				return Err(Error::Multisig(
+					"Share file and nonce file reference different verifying keys".to_string(),
+				));
+			}
+			let envelope: SigningPackageEnvelope = read_json_from_path(&signing_package_path)?;
+			if envelope.signing_package.verifying_key != share.verifying_key {
+				return Err(Error::Multisig(
+					"Signing package verifying key does not match participant share".to_string(),
+				));
+			}
+			let key_package_bytes = from_hex(&share.key_package).map_err(|e| {
+				Error::GenericError(format!(
+					"Unable to decode key package from {}: {}",
+					share_path.display(),
+					e
+				))
+			})?;
+			let nonce_bytes = from_hex(&nonce.nonces).map_err(|e| {
+				Error::GenericError(format!(
+					"Unable to decode signing nonces from {}: {}",
+					nonce_path.display(),
+					e
+				))
+			})?;
+			let signing_package_bytes = from_hex(&envelope.signing_package.signing_package_hex)
+				.map_err(|e| {
+					Error::GenericError(format!(
+						"Unable to decode signing package from {}: {}",
+						signing_package_path.display(),
+						e
+					))
+				})?;
+			let signature_bytes = libwallet::crypto::frost::generate_round2_signature(
+				&key_package_bytes,
+				&nonce_bytes,
+				&signing_package_bytes,
+			)
+			.map_err(|e| Error::Multisig(e.to_string()))?;
+			let signature_hex = signature_bytes.to_hex();
+			let signature_record = json::json!({
+				"label": share.label,
+				"signature": signature_hex,
+			});
+			match outfile {
+				Some(path) => {
+					write_json_to_path(&path, &signature_record)?;
+					println!("Signature share written to {}", path.display());
+				}
+				None => {
+					println!(
+						"{}",
+						serde_json::to_string_pretty(&signature_record).map_err(|e| {
+							Error::GenericError(format!(
+								"Unable to serialize signature share: {}",
+								e
+							))
+						})?
+					);
+				}
+			}
 			Ok(())
 		}
 	}
